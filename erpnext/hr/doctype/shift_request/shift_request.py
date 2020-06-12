@@ -24,6 +24,9 @@ class ShiftRequest(Document):
 			assignment_doc.employee = self.employee
 			assignment_doc.date = date
 			assignment_doc.shift_request = self.name
+# New split-shift Attributes
+			assignment_doc.is_split_shift = self.is_split_shift
+			assignment_doc.split_shift_type = self.split_shift_type
 			assignment_doc.insert()
 			assignment_doc.submit()
 
@@ -86,7 +89,7 @@ class ShiftRequest(Document):
 			employee_holiday_list.append(d.holiday_date)
 
 		reference_date = start_date
-		
+
 		while reference_date <= end_date:
 			if reference_date not in employee_holiday_list:
 				date_list.append(reference_date)

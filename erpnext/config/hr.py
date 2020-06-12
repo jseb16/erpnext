@@ -174,6 +174,10 @@ def get_data():
 					"type": "doctype",
 					"name": "Income Tax Slab",
 				},
+					{
+					"type": "doctype",
+					"name": "Social Security Slab",
+				},
 				{
 					"type": "doctype",
 					"name": "Salary Component",
