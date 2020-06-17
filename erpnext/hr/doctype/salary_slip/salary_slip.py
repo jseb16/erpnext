@@ -147,6 +147,7 @@ class SalarySlip(TransactionBase):
 			for data in timesheets:
 				self.append('timesheets', {
 					'time_sheet': data.name,
+					'start_date': data.start_date,
 					'working_hours': data.total_hours
 				})
 
@@ -182,9 +183,11 @@ class SalarySlip(TransactionBase):
 			self.salary_structure = self._salary_structure_doc.name
 			self.hour_rate = self._salary_structure_doc.hour_rate
 			self.overtime_rate = self._salary_structure_doc.approved_overtime_rate or 0.0
+			self.time_and_a_half_rate = self.hour_rate * 1.5
+			self.double_time_rate = self.hour_rate * 2
 			overtime_threshold = self._salary_structure_doc.approved_overtime_threshold or 0.0
-			total_hours = sum([d.working_hours or 0.0 for d in self.timesheets]) or 0.0
-			self.calculate_holiday_hours
+			holiday_hours = self.calculate_holiday_hours()
+			total_hours = sum([d.working_hours or 0.0 for d in self.timesheets]) - holiday_hours or 0.0
 			if self.is_overtime_approved and total_hours > overtime_threshold:
 				self.total_working_hours = overtime_threshold
 				self.total_overtime_hours = total_hours - overtime_threshold
@@ -200,7 +203,28 @@ class SalarySlip(TransactionBase):
 		make_salary_slip(self._salary_structure_doc.name, self)
 
 	def calculate_holiday_hours(self):
-		print(self.get_holidays_for_employee(self.start_date, self.end_date).__dict__)
+		holiday_list = get_holiday_list_for_employee(self.employee)
+		holidays = frappe.db.get_list(
+			'Holiday',
+			filters={
+				"parent" : holiday_list,
+				"rate": [">", 0],
+				"holiday_date": ["between", (self.start_date, self.end_date)],
+				},
+			fields=['holiday_date', 'rate'])
+		time_and_a_half, double_time = 0, 0
+		for h in holidays:
+			for t in self.timesheets:
+				if t.start_date == h.holiday_date and h.rate == 2:
+					double_time += t.working_hours
+					break
+				if t.start_date == h.holiday_date and h.rate == 1.5:
+					time_and_a_half += t.working_hours
+					break
+		self.total_time_and_a_half_hours = time_and_a_half
+		self.total_double_time_hours = double_time
+		self.add_earning_for_hourly_wages_holdays(time_and_a_half, double_time)
+		return time_and_a_half + double_time
 
 
 	def get_leave_details(self, joining_date=None, relieving_date=None, lwp=None, for_preview=0):
@@ -333,7 +357,39 @@ class SalarySlip(TransactionBase):
 				"insurable_earning": 1.0
 			}
 			doc.append('earnings', wages_row)
+	def add_earning_for_hourly_wages_holdays(self, time_and_a_half, double_time):
+		time_and_a_half_exist = False
+		double_time_exist = False
+		for row in self.earnings:
+			if row.salary_component == "Time and a Half":
+				row.amount = time_and_a_half * self.time_and_a_half_rate
+				time_and_a_half_exist = True
+			if row.salary_component == "Double Time":
+				row.amount = double_time * self.double_time_rate
+				double_time_exist = True
 
+		if not time_and_a_half_exist:
+			time_and_a_half_row = {
+				"salary_component": "Time and a Half",
+				"abbr": frappe.db.get_value("Salary Component", "Time and a Half", "salary_component_abbr"),
+				"amount": time_and_a_half * self.time_and_a_half_rate,
+				"default_amount": 0.0,
+				"additional_amount": 0.0,
+				"is_tax_applicable":1.0,
+				"insurable_earning": 1.0
+			}
+			self.append('earnings', time_and_a_half_row)
+		if not double_time_exist:
+			double_time_row = {
+				"salary_component": "Double Time",
+				"abbr": frappe.db.get_value("Salary Component", "Double Time", "salary_component_abbr"),
+				"amount": double_time * self.double_time_rate,
+				"default_amount": 0.0,
+				"additional_amount": 0.0,
+				"is_tax_applicable":1.0,
+				"insurable_earning": 1.0
+			}
+			self.append('earnings', double_time_row)
 	def calculate_net_pay(self):
 		if self.salary_structure:
 			self.calculate_component_amounts("earnings")
@@ -474,37 +530,36 @@ class SalarySlip(TransactionBase):
 			return
 		contributions = self.calculate_social_security_variables(payroll_period)
 
-		self.append("deductions", {
-			'amount': contributions.employee_contribution,
-			'depends_on_payment_days' : 0,
-			'salary_component' : "Employee Contribution",
-			'abbr' : "EEC",
-			'is_tax_applicable': 0.0,
-			'additional_amount': 0,
-			'exempted_from_income_tax': 0.0
-		})
-		self.append("deductions", {
-			'amount': contributions.employer_contribution,
-			'depends_on_payment_days' : 0,
-			'salary_component' : "Employer Contribution",
-			'do_not_include_in_total' : 1.0,
-			'abbr' : "ERC",
-			'statistical_component': 1.0,
-			'is_tax_applicable': 0.0,
-			'additional_amount': 0,
-			'exempted_from_income_tax': 0.0
-		})
-		self.append("deductions", {
-			'amount': contributions.total_contribution,
-			'depends_on_payment_days' : 0,
-			'salary_component' : "Total Contribution",
-			'do_not_include_in_total' : 1.0,
-			'abbr' : "TC",
-			'statistical_component': 1.0,
-			'is_tax_applicable': 0.0,
-			'additional_amount': 0,
-			'exempted_from_income_tax': 0.0
-		})
+		row_exists = False
+		for row in self.deductions:
+			if row.salary_component == "Employee Contribution":
+				row.amount = contributions.employee_contribution
+				row_exists = True
+			if row.salary_component == "Employer Contribution":
+				row.amount = contributions.employer_contribution
+				row_exists = True
+				break
+		if not row_exists:
+			self.append("deductions", {
+				'amount': contributions.employee_contribution,
+				'depends_on_payment_days' : 0,
+				'salary_component' : "Employee Contribution",
+				'abbr' : "EEC",
+				'is_tax_applicable': 0,
+				'additional_amount': 0,
+				'exempted_from_income_tax': 0
+			})
+			self.append("deductions", {
+				'amount': contributions.employer_contribution,
+				'depends_on_payment_days' : 0,
+				'salary_component' : "Employer Contribution",
+				'do_not_include_in_total' : 1,
+				'abbr' : "ERC",
+				'statistical_component': 0,
+				'is_tax_applicable': 0,
+				'additional_amount': 0,
+				'exempted_from_income_tax': 0
+			})
 	def update_component_row(self, struct_row, amount, key, overwrite=1):
 		print(struct_row.__dict__)
 		component_row = None
